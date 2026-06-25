@@ -8,6 +8,7 @@ import BackButton from "../../back-button";
 import LoadingScreen from "../../../loading-screen";
 import styles from "../../transactions/transactions.module.css";
 import { DataTable } from "../../../../components";
+import { getCsrfToken } from "../../../csrf";
 
 const DEFAULT_ROWS_PER_PAGE = 10;
 
@@ -102,7 +103,7 @@ export default function DashboardCustomerListPage() {
   const [currentPage, setCurrentPage] = useState(1);
 
   useEffect(() => {
-    fetch("/api/customers", { cache: "no-store" })
+    fetch("/api/customers/", { cache: "no-store" })
       .then((response) => response.json().then((data) => ({ ok: response.ok, data })))
       .then(({ ok, data }) => {
         if (!ok || !data?.success) {
@@ -170,7 +171,23 @@ export default function DashboardCustomerListPage() {
     try {
       await notify.promise(
         async () => {
-          const response = await fetch(`/api/customers/${customerId}`, { method: "DELETE" });
+          if (!customerId) {
+            throw new Error("Invalid customer ID.");
+          }
+
+          const response = await fetch(`/api/customers/${customerId}/`, {
+            method: "DELETE",
+            headers: {
+              "X-CSRFToken": getCsrfToken(),
+              "Accept": "application/json",
+            },
+          });
+
+          const contentType = response.headers.get("content-type");
+          if (!contentType || !contentType.includes("application/json")) {
+            throw new Error(`Server returned an unexpected response (Status ${response.status}). Please check your connection.`);
+          }
+
           const data = await response.json();
 
           if (!response.ok || !data?.success) {

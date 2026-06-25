@@ -220,7 +220,7 @@ export default function DashboardCollectionPage() {
   const [addDate, setAddDate] = useState("");
 
   const reloadCustomers = useCallback(async () => {
-    const response = await fetch("/api/customers", { cache: "no-store" });
+    const response = await fetch("/api/customers/", { cache: "no-store" });
     const data = await response.json();
     if (!response.ok || !data?.success) {
       throw new Error(data?.message ?? "Unable to reload customers.");
@@ -229,7 +229,7 @@ export default function DashboardCollectionPage() {
   }, []);
 
   useEffect(() => {
-    fetch("/api/customers", { cache: "no-store" })
+    fetch("/api/customers/", { cache: "no-store" })
       .then((response) => response.json().then((data) => ({ ok: response.ok, data })))
       .then(({ ok, data }) => {
         if (!ok || !data?.success) {
@@ -288,7 +288,7 @@ export default function DashboardCollectionPage() {
     try {
       await notify.promise(
         async () => {
-          const response = await fetch(`/api/customers/${customerId}`, {
+          const response = await fetch(`/api/customers/${customerId}/`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ jewel_entries: nextEntries }),

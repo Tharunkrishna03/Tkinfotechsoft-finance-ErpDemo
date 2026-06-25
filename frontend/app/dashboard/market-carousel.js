@@ -8,8 +8,8 @@ import styles from "./dashboard.module.css";
 const AUTO_ROTATE_MS = 4500;
 const REFRESH_MS = 300000;
 
-async function requestMarketData() {
-  return getDashboardMarketData().catch(() => null);
+async function requestMarketData(refresh = false) {
+  return getDashboardMarketData(refresh).catch(() => null);
 }
 
 function formatPrice(value, currencyCode) {
@@ -198,9 +198,24 @@ function MarketSlide({ item }) {
 export default function MarketCarousel({ initialData }) {
   const [data, setData] = useState(initialData);
   const [activeIndex, setActiveIndex] = useState(0);
-  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(!initialData);
 
   const items = data?.items ?? [];
+
+  function applyNextData(nextData) {
+    if (!nextData) {
+      return;
+    }
+
+    setData(nextData);
+    setActiveIndex((current) => {
+      if (!nextData.items?.length) {
+        return 0;
+      }
+
+      return Math.min(current, nextData.items.length - 1);
+    });
+  }
 
   const rotateSlides = useEffectEvent(() => {
     setActiveIndex((current) => {
@@ -216,20 +231,7 @@ export default function MarketCarousel({ initialData }) {
     setIsRefreshing(true);
 
     try {
-      const nextData = await requestMarketData();
-
-      if (!nextData) {
-        return;
-      }
-
-      setData(nextData);
-      setActiveIndex((current) => {
-        if (!nextData.items?.length) {
-          return 0;
-        }
-
-        return Math.min(current, nextData.items.length - 1);
-      });
+      applyNextData(await requestMarketData());
     } finally {
       setIsRefreshing(false);
     }
@@ -239,24 +241,19 @@ export default function MarketCarousel({ initialData }) {
     setIsRefreshing(true);
 
     try {
-      const nextData = await requestMarketData();
-
-      if (!nextData) {
-        return;
-      }
-
-      setData(nextData);
-      setActiveIndex((current) => {
-        if (!nextData.items?.length) {
-          return 0;
-        }
-
-        return Math.min(current, nextData.items.length - 1);
-      });
+      applyNextData(await requestMarketData(true));
     } finally {
       setIsRefreshing(false);
     }
   }
+
+  useEffect(() => {
+    if (data) {
+      return;
+    }
+
+    refreshMarketsInEffect();
+  }, [data]);
 
   useEffect(() => {
     if (!items.length) {

@@ -1,828 +1,57 @@
-import hashlib
 import json
-from collections.abc import Mapping
 from datetime import date
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from functools import wraps
-from urllib.parse import urlencode
-from uuid import uuid4
-
-from django.conf import settings
-from django.contrib.auth import authenticate
-from django.contrib.auth import get_user_model
-from django.contrib.auth import login as auth_login
-from django.contrib.auth import logout as auth_logout
-from django.contrib.auth import password_validation
-from django.contrib.auth import update_session_auth_hash
-from django.core.cache import cache
-from django.core.exceptions import ValidationError
-from django.core.files.storage import default_storage
-from django.db import transaction
+from decimal import Decimal
+from django.contrib.auth import authenticate, login, logout, get_user_model
 from django.http import JsonResponse
-from django.middleware.csrf import get_token
 from django.shortcuts import get_object_or_404
-from django.views.decorators.csrf import ensure_csrf_cookie
-from django.views.decorators.http import require_http_methods
-from rest_framework import status
-from rest_framework.decorators import api_view, authentication_classes, permission_classes
-from rest_framework.exceptions import ParseError
-from rest_framework.permissions import AllowAny
+from django.middleware.csrf import get_token
+from django.views.decorators.csrf import ensure_csrf_cookie, csrf_exempt
+from rest_framework.decorators import api_view, permission_classes, authentication_classes
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
-
-try:
-    from rest_framework_simplejwt.exceptions import TokenError
-    from rest_framework_simplejwt.tokens import RefreshToken
-except ImportError:  # pragma: no cover - exercised when SimpleJWT is installed.
-    RefreshToken = None
-
-    class TokenError(Exception):
-        pass
-
-from .models import (
-    Customer,
-    DEFAULT_TENURE_MONTHS,
-    MONTHLY_INTEREST_RATE,
-    UserProfile,
-    WorkspaceSettings,
-    render_sequence_value,
-)
-from .serializers import LoginSerializer, RegistrationSerializer
-
-
-MONEY_QUANTIZER = Decimal("0.01")
-
-
-def build_json_error_response(message, status, *, errors=None):
-    payload = {
-        "success": False,
-        "message": message,
-    }
-
-    if errors is not None:
-        payload["errors"] = errors
-
-    return JsonResponse(payload, status=status)
-
-
-def build_api_error_response(message, status_code, *, errors=None):
-    payload = {
-        "success": False,
-        "message": message,
-    }
-
-    if errors is not None:
-        payload["errors"] = errors
-
-    return Response(payload, status=status_code)
-
-
-def require_authenticated_user(view_func):
-    @wraps(view_func)
-    def wrapped(request, *args, **kwargs):
-        if not request.user.is_authenticated:
-            return build_json_error_response("Authentication required.", 401)
-
-        if not request.user.is_active:
-            return build_json_error_response("This account is inactive.", 403)
-
-        return view_func(request, *args, **kwargs)
-
-    return wrapped
-
-
-def get_client_ip_address(request):
-    forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR", "")
-
-    if forwarded_for:
-        return forwarded_for.split(",")[0].strip()
-
-    return request.META.get("REMOTE_ADDR", "unknown")
-
-
-def build_login_throttle_key(request, username):
-    fingerprint = f"{get_client_ip_address(request)}:{username.casefold()}".encode("utf-8")
-    return f"login-throttle:{hashlib.sha256(fingerprint).hexdigest()}"
-
-
-def is_login_rate_limited(request, username):
-    throttle_key = build_login_throttle_key(request, username)
-    current_attempts = cache.get(throttle_key, 0)
-
-    return current_attempts >= settings.LOGIN_RATE_LIMIT_ATTEMPTS
-
-
-def register_failed_login_attempt(request, username):
-    throttle_key = build_login_throttle_key(request, username)
-    current_attempts = cache.get(throttle_key, 0) + 1
-    cache.set(throttle_key, current_attempts, timeout=settings.LOGIN_RATE_LIMIT_WINDOW_SECONDS)
-
-
-def clear_failed_login_attempts(request, username):
-    cache.delete(build_login_throttle_key(request, username))
-
-
-def get_raw_request(request):
-    return getattr(request, "_request", request)
-
-
-def parse_api_payload(request, invalid_message="Request body must be valid JSON."):
-    try:
-        payload = request.data
-    except ParseError:
-        return None, build_api_error_response(
-            invalid_message,
-            status.HTTP_400_BAD_REQUEST,
-        )
-
-    if payload in (None, ""):
-        return {}, None
-
-    if not isinstance(payload, Mapping):
-        return None, build_api_error_response(
-            invalid_message,
-            status.HTTP_400_BAD_REQUEST,
-        )
-
-    return payload, None
-
-
-def resolve_authenticated_user(raw_request, username, password):
-    user = authenticate(raw_request, username=username, password=password)
-    matched_user = get_user_model().objects.filter(username__iexact=username).first()
-
-    if user is None and matched_user is not None and matched_user.username != username:
-        user = authenticate(raw_request, username=matched_user.username, password=password)
-
-    return user, matched_user
-
-
-def build_user_summary(user):
-    display_name = user.first_name.strip() or user.username
-    return {
-        "id": user.pk,
-        "username": user.username,
-        "email": user.email,
-        "first_name": user.first_name,
-        "last_name": user.last_name,
-        "display_name": display_name,
-    }
-
-
-def build_token_payload(user):
-    if not settings.ENABLE_JWT_AUTH or RefreshToken is None:
-        return None
-
-    refresh = RefreshToken.for_user(user)
-
-    return {
-        "access": str(refresh.access_token),
-        "refresh": str(refresh),
-    }
-
-
-@api_view(["GET"])
-@authentication_classes([])
-@permission_classes([AllowAny])
-def login_demo_accounts_view(request):
-    return Response(
-        {
-            "success": False,
-            "message": "Demo login accounts are no longer available.",
-        },
-        status=status.HTTP_410_GONE,
-    )
-
-
-@ensure_csrf_cookie
-@api_view(["GET"])
-@authentication_classes([])
-@permission_classes([AllowAny])
-def csrf_token_view(request):
-    raw_request = get_raw_request(request)
-    csrf_token = get_token(raw_request)
-
-    return Response(
-        {
-            "success": True,
-            "csrf_token": csrf_token,
-        },
-        status=status.HTTP_200_OK,
-    )
-
-
-@ensure_csrf_cookie
-@api_view(["POST"])
-@authentication_classes([])
-@permission_classes([AllowAny])
-def login_view(request):
-    payload, error_response = parse_api_payload(request)
-
-    if error_response is not None:
-        return error_response
-
-    serializer = LoginSerializer(data=payload)
-
-    if not serializer.is_valid():
-        return build_api_error_response(
-            "Please correct the login details.",
-            status.HTTP_400_BAD_REQUEST,
-            errors=serializer.errors,
-        )
-
-    raw_request = get_raw_request(request)
-    username = serializer.validated_data["username"].strip()
-    password = serializer.validated_data["password"]
-
-    if is_login_rate_limited(raw_request, username):
-        return build_api_error_response(
-            "Too many login attempts. Please wait a few minutes and try again.",
-            status.HTTP_429_TOO_MANY_REQUESTS,
-        )
-
-    user, matched_user = resolve_authenticated_user(raw_request, username, password)
-
-    if user is None and matched_user is not None and not matched_user.is_active and matched_user.check_password(password):
-        return build_api_error_response(
-            "This account is inactive.",
-            status.HTTP_403_FORBIDDEN,
-        )
-
-    if user is None:
-        register_failed_login_attempt(raw_request, username)
-        return build_api_error_response(
-            "Invalid username or password.",
-            status.HTTP_401_UNAUTHORIZED,
-        )
-
-    if not user.is_active:
-        return build_api_error_response(
-            "This account is inactive.",
-            status.HTTP_403_FORBIDDEN,
-        )
-
-    auth_login(raw_request, user)
-    raw_request.session.set_expiry(settings.SESSION_COOKIE_AGE)
-    clear_failed_login_attempts(raw_request, user.username)
-    get_token(raw_request)
-
-    response_payload = {
-        "success": True,
-        "message": f"Login successful. Welcome, {user.username}.",
-        "username": user.username,
-        "display_name": user.first_name or user.username,
-        "user": build_user_summary(user),
-        "auth": {
-            "session": True,
-            "jwt": settings.ENABLE_JWT_AUTH,
-        },
-    }
-    tokens = build_token_payload(user)
-
-    if tokens is not None:
-        response_payload["tokens"] = tokens
-
-    return Response(response_payload, status=status.HTTP_200_OK)
-
-
-@ensure_csrf_cookie
-@api_view(["POST"])
-@authentication_classes([])
-@permission_classes([AllowAny])
-def signup_view(request):
-    payload, error_response = parse_api_payload(request)
-
-    if error_response is not None:
-        return error_response
-
-    serializer = RegistrationSerializer(data=payload)
-
-    if not serializer.is_valid():
-        return build_api_error_response(
-            "Please correct the signup details.",
-            status.HTTP_400_BAD_REQUEST,
-            errors=serializer.errors,
-        )
-
-    with transaction.atomic():
-        user = serializer.save()
-
-    raw_request = get_raw_request(request)
-    auth_login(raw_request, user)
-    raw_request.session.set_expiry(settings.SESSION_COOKIE_AGE)
-    get_token(raw_request)
-
-    response_payload = {
-        "success": True,
-        "message": "Registration successful.",
-        "username": user.username,
-        "display_name": user.first_name or user.username,
-        "user": build_user_summary(user),
-        "auth": {
-            "session": True,
-            "jwt": settings.ENABLE_JWT_AUTH,
-        },
-    }
-    tokens = build_token_payload(user)
-
-    if tokens is not None:
-        response_payload["tokens"] = tokens
-
-    return Response(response_payload, status=status.HTTP_201_CREATED)
-
-
-@api_view(["POST"])
-def logout_view(request):
-    payload, error_response = parse_api_payload(request)
-
-    if error_response is not None:
-        return error_response
-
-    raw_request = get_raw_request(request)
-    refresh_token = str(payload.get("refresh", "")).strip()
-
-    if not request.user.is_authenticated and not refresh_token:
-        return build_api_error_response(
-            "Authentication required.",
-            status.HTTP_401_UNAUTHORIZED,
-        )
-
-    token_revoked = False
-
-    if refresh_token:
-        if not settings.ENABLE_JWT_AUTH or RefreshToken is None:
-            return build_api_error_response(
-                "JWT authentication is not enabled.",
-                status.HTTP_400_BAD_REQUEST,
-                errors={"refresh": "JWT authentication is not enabled."},
-            )
-
-        try:
-            RefreshToken(refresh_token).blacklist()
-            token_revoked = True
-        except TokenError:
-            return build_api_error_response(
-                "Refresh token is invalid or expired.",
-                status.HTTP_400_BAD_REQUEST,
-                errors={"refresh": "Refresh token is invalid or expired."},
-            )
-
-    auth_logout(raw_request)
-    return Response(
-        {
-            "success": True,
-            "message": "Logout successful.",
-            "token_revoked": token_revoked,
-        }
-    )
-
-
-def get_authenticated_user_from_request(request):
-    if not request.user.is_authenticated:
-        return None, build_json_error_response("Authentication required.", 401)
-
-    if not request.user.is_active:
-        return None, build_json_error_response("This account is inactive.", 403)
-
-    return request.user, None
-
-
-def build_profile_display_name(user):
-    return user.first_name.strip() or user.username
-
-
-def build_profile_photo_url(profile, request):
-    if not profile.photo:
-        return None
-
-    photo_url = request.build_absolute_uri(profile.photo.url)
-
-    try:
-        modified_timestamp = int(profile.photo.storage.get_modified_time(profile.photo.name).timestamp())
-    except (OSError, ValueError, NotImplementedError):
-        return photo_url
-
-    return f"{photo_url}?{urlencode({'v': modified_timestamp})}"
-
-
-def serialize_profile(user, request):
-    profile, _ = UserProfile.objects.get_or_create(user=user)
-
-    return {
-        "username": user.username,
-        "display_name": build_profile_display_name(user),
-        "avatar_initial": build_profile_display_name(user)[:1].upper(),
-        "photo_url": build_profile_photo_url(profile, request),
-    }
-
-
-@require_http_methods(["GET", "POST"])
-@require_authenticated_user
-def profile_view(request):
-    user, error_response = get_authenticated_user_from_request(request)
-
-    if error_response is not None:
-        return error_response
-
-    if request.method == "GET":
-        return JsonResponse(
-            {
-                "success": True,
-                "profile": serialize_profile(user, request),
-            }
-        )
-
-    try:
-        payload = json.loads(request.body or "{}")
-    except json.JSONDecodeError:
-        return build_json_error_response("Request body must be valid JSON.", 400)
-
-    display_name = str(payload.get("display_name", "")).strip()
-
-    if not display_name:
-        return build_json_error_response(
-            "Display name is required.",
-            400,
-            errors={"display_name": "Display name is required."},
-        )
-
-    user.first_name = display_name
-    user.full_clean(exclude=["password"])
-    user.save(update_fields=["first_name"])
-
-    return JsonResponse(
-        {
-            "success": True,
-            "message": "Profile name updated successfully.",
-            "profile": serialize_profile(user, request),
-        }
-    )
-
-
-@require_http_methods(["POST"])
-@require_authenticated_user
-def profile_password_view(request):
-    user, error_response = get_authenticated_user_from_request(request)
-
-    if error_response is not None:
-        return error_response
-
-    try:
-        payload = json.loads(request.body or "{}")
-    except json.JSONDecodeError:
-        return build_json_error_response("Request body must be valid JSON.", 400)
-
-    current_password = str(payload.get("current_password", ""))
-    new_password = str(payload.get("new_password", ""))
-    confirm_password = str(payload.get("confirm_password", ""))
-
-    if not current_password or not new_password or not confirm_password:
-        return build_json_error_response(
-            "All password fields are required.",
-            400,
-            errors={
-                "current_password": "Current password is required." if not current_password else "",
-                "new_password": "New password is required." if not new_password else "",
-                "confirm_password": "Please confirm the new password." if not confirm_password else "",
-            },
-        )
-
-    if not user.check_password(current_password):
-        return build_json_error_response(
-            "Current password is incorrect.",
-            400,
-            errors={"current_password": "Current password is incorrect."},
-        )
-
-    if new_password != confirm_password:
-        return build_json_error_response(
-            "New password and confirm password must match.",
-            400,
-            errors={"confirm_password": "New password and confirm password must match."},
-        )
-
-    try:
-        password_validation.validate_password(new_password, user=user)
-    except ValidationError as error:
-        return build_json_error_response(
-            error.messages[0] if error.messages else "Password is not valid.",
-            400,
-            errors={
-                "new_password": error.messages[0] if error.messages else "Password is not valid.",
-            },
-        )
-
-    user.set_password(new_password)
-    user.save(update_fields=["password"])
-    update_session_auth_hash(request, user)
-    get_token(request)
-
-    return JsonResponse(
-        {
-            "success": True,
-            "message": "Password changed successfully.",
-        }
-    )
-
-
-@require_http_methods(["POST"])
-@require_authenticated_user
-def profile_photo_view(request):
-    user, error_response = get_authenticated_user_from_request(request)
-
-    if error_response is not None:
-        return error_response
-
-    photo = request.FILES.get("photo")
-
-    if photo is None:
-        return build_json_error_response(
-            "Profile photo is required.",
-            400,
-            errors={"photo": "Profile photo is required."},
-        )
-
-    profile, _ = UserProfile.objects.get_or_create(user=user)
-    existing_photo_name = profile.photo.name if profile.photo else None
-    profile.photo = photo
-
-    try:
-        profile.full_clean()
-        profile.save()
-    except ValidationError as error:
-        return build_json_error_response(
-            "Please correct the profile photo.",
-            400,
-            errors=format_validation_error(error),
-        )
-
-    if existing_photo_name and existing_photo_name != profile.photo.name:
-        default_storage.delete(existing_photo_name)
-
-    return JsonResponse(
-        {
-            "success": True,
-            "message": "Profile photo updated successfully.",
-            "profile": serialize_profile(user, request),
-        }
-    )
-
-
-def format_validation_error(error):
-    if hasattr(error, "message_dict"):
-        return {
-            field: messages[0] if isinstance(messages, list) else messages
-            for field, messages in error.message_dict.items()
-        }
-
-    return {"non_field_errors": error.messages[0] if error.messages else "Invalid request."}
-
-
-def parse_json_body(request, invalid_message):
-    try:
-        return json.loads(request.body or "{}"), None
-    except json.JSONDecodeError:
-        return None, JsonResponse(
-            {
-                "success": False,
-                "message": invalid_message,
-            },
-            status=400,
-        )
-
-
-def format_currency_amount(value):
-    return str(Decimal(value).quantize(MONEY_QUANTIZER, rounding=ROUND_HALF_UP))
-
-
-def parse_decimal_value(raw_value, field_name, *, required=False, allow_zero=False):
-    text_value = str(raw_value if raw_value is not None else "").strip()
-
-    if not text_value:
-        if required:
-            raise ValidationError({field_name: "This field is required."})
-        return None
-
-    try:
-        decimal_value = Decimal(text_value)
-    except InvalidOperation as error:
-        raise ValidationError({field_name: "Enter a valid amount."}) from error
-
-    if decimal_value < 0 or (not allow_zero and decimal_value == 0):
-        raise ValidationError(
-            {
-                field_name: "Amount must be greater than zero." if not allow_zero else "Amount cannot be negative.",
-            }
-        )
-
-    return decimal_value.quantize(MONEY_QUANTIZER, rounding=ROUND_HALF_UP)
-
-
-def parse_iso_date(raw_value, field_name, *, required=False):
-    text_value = str(raw_value if raw_value is not None else "").strip()
-
-    if not text_value:
-        if required:
-            raise ValidationError({field_name: "Date is required."})
-        return None
-
-    try:
-        return date.fromisoformat(text_value)
-    except ValueError as error:
-        raise ValidationError({field_name: "Enter a valid date."}) from error
-
+from rest_framework import status
+from .models import Customer, WorkspaceSettings, render_sequence_value
+
+MONTHLY_INTEREST_RATE = Decimal("2.5")
+DEFAULT_TENURE_MONTHS = 12
 
 def normalize_jewel_entries(raw_entries):
-    if raw_entries in (None, ""):
-        return []
-
     if not isinstance(raw_entries, list):
-        raise ValidationError({"jewel_entries": "Transactions must be a valid list."})
-
-    normalized_entries = []
-
-    for index, raw_entry in enumerate(raw_entries, start=1):
-        if not isinstance(raw_entry, dict):
-            raise ValidationError({"jewel_entries": f"Transaction {index} is invalid."})
-
-        amount = parse_decimal_value(raw_entry.get("amount"), f"jewel_entries_{index}_amount", required=True)
-        transaction_date = parse_iso_date(raw_entry.get("date"), f"jewel_entries_{index}_date", required=True)
-        closures = raw_entry.get("closures") or []
-        tenure_date_overrides = raw_entry.get("tenure_date_overrides") or []
         try:
-            raw_visible_months = raw_entry.get("visible_months")
-            raw_tenure_months = raw_entry.get("tenure_months")
-            visible_months = int(
-                raw_visible_months
-                if raw_visible_months not in (None, "")
-                else raw_tenure_months or DEFAULT_TENURE_MONTHS
-            )
-        except (TypeError, ValueError) as error:
-            raise ValidationError({"jewel_entries": f"Transaction {index} month count is invalid."}) from error
+            entries = json.loads(raw_entries or "[]")
+        except:
+            entries = []
+    else:
+        entries = raw_entries
 
-        if visible_months < 1:
-            visible_months = 1
+    normalized = []
+    for entry in entries:
+        amount = Decimal(str(entry.get("amount") or 0))
+        date = entry.get("date")
+        tenure_months = int(entry.get("tenure_months") or DEFAULT_TENURE_MONTHS)
+        visible_months = int(entry.get("visible_months") or tenure_months)
+        closures = entry.get("closures") or []
+        
+        monthly_interest = (amount * MONTHLY_INTEREST_RATE / Decimal("100")).quantize(Decimal("0.01"))
+        paid_amount = sum((Decimal(str(c.get("amount") or 0)) for c in closures), Decimal("0")).quantize(Decimal("0.01"))
+        pending_amount = max(amount - paid_amount, Decimal("0")).quantize(Decimal("0.01"))
 
-        if not isinstance(closures, list):
-            raise ValidationError({"jewel_entries": f"Transaction {index} closures are invalid."})
-
-        if not isinstance(tenure_date_overrides, list):
-            raise ValidationError({"jewel_entries": f"Transaction {index} tenure dates are invalid."})
-
-        normalized_closures = []
-        normalized_tenure_date_overrides = []
-
-        for closure_index, closure in enumerate(closures, start=1):
-            if not isinstance(closure, dict):
-                raise ValidationError(
-                    {
-                        "jewel_entries": (
-                            f"Transaction {index} closure {closure_index} must be a valid record."
-                        ),
-                    }
-                )
-
-            try:
-                month = int(closure.get("month"))
-            except (TypeError, ValueError) as error:
-                raise ValidationError(
-                    {
-                        "jewel_entries": (
-                            f"Transaction {index} closure {closure_index} month is invalid."
-                        ),
-                    }
-                ) from error
-
-            if month < 1:
-                raise ValidationError(
-                    {
-                        "jewel_entries": (
-                            f"Transaction {index} closure {closure_index} month must be at least 1."
-                        ),
-                    }
-                )
-
-            if month > visible_months:
-                continue
-
-            closure_amount = parse_decimal_value(
-                closure.get("amount"),
-                f"jewel_entries_{index}_closure_{closure_index}_amount",
-                allow_zero=True,
-            )
-            closure_date = parse_iso_date(
-                closure.get("date"),
-                f"jewel_entries_{index}_closure_{closure_index}_date",
-            )
-
-            if closure_amount is None and closure_date is None:
-                continue
-
-            normalized_closures.append(
-                {
-                    "month": month,
-                    "amount": format_currency_amount(closure_amount or Decimal("0")),
-                    "date": closure_date.isoformat() if closure_date else "",
-                }
-            )
-
-        for override_index, override in enumerate(tenure_date_overrides, start=1):
-            if not isinstance(override, dict):
-                raise ValidationError(
-                    {
-                        "jewel_entries": (
-                            f"Transaction {index} tenure date {override_index} must be a valid record."
-                        ),
-                    }
-                )
-
-            try:
-                month = int(override.get("month"))
-            except (TypeError, ValueError) as error:
-                raise ValidationError(
-                    {
-                        "jewel_entries": (
-                            f"Transaction {index} tenure date {override_index} month is invalid."
-                        ),
-                    }
-                ) from error
-
-            if month < 1:
-                raise ValidationError(
-                    {
-                        "jewel_entries": (
-                            f"Transaction {index} tenure date {override_index} month must be at least 1."
-                        ),
-                    }
-                )
-
-            if month > visible_months:
-                continue
-
-            tenure_date = parse_iso_date(
-                override.get("date"),
-                f"jewel_entries_{index}_tenure_date_{override_index}_date",
-            )
-
-            if tenure_date is None:
-                continue
-
-            normalized_tenure_date_overrides.append(
-                {
-                    "month": month,
-                    "date": tenure_date.isoformat(),
-                }
-            )
-
-        monthly_interest = (
-            amount * MONTHLY_INTEREST_RATE / Decimal("100")
-        ).quantize(MONEY_QUANTIZER, rounding=ROUND_HALF_UP)
-
-        paid_amount = sum(
-            Decimal(item["amount"]) for item in normalized_closures
-        ).quantize(MONEY_QUANTIZER, rounding=ROUND_HALF_UP) if normalized_closures else Decimal("0.00")
-        pending_amount = max(amount - paid_amount, Decimal("0.00")).quantize(
-            MONEY_QUANTIZER, rounding=ROUND_HALF_UP
-        )
-
-        normalized_entries.append(
-            {
-                "id": str(raw_entry.get("id") or uuid4()),
-                "amount": format_currency_amount(amount),
-                "date": transaction_date.isoformat(),
-                "interest_rate": format_currency_amount(MONTHLY_INTEREST_RATE),
-                "monthly_interest": format_currency_amount(monthly_interest),
-                "paid_amount": format_currency_amount(paid_amount),
-                "pending_amount": format_currency_amount(pending_amount),
-                "tenure_months": int(raw_entry.get("tenure_months") or DEFAULT_TENURE_MONTHS),
-                "visible_months": visible_months,
-                "closures": sorted(normalized_closures, key=lambda closure: closure["month"]),
-                "tenure_date_overrides": sorted(
-                    normalized_tenure_date_overrides,
-                    key=lambda override: override["month"],
-                ),
-            }
-        )
-
-    return normalized_entries
-
-
-def serialize_workspace_settings(settings_obj):
-    return {
-        "sno_format": settings_obj.sno_format,
-        "ano_format": settings_obj.ano_format,
-        "next_sno_number": settings_obj.next_sno_number,
-        "next_ano_number": settings_obj.next_ano_number,
-        "next_sno_value": render_sequence_value(settings_obj.sno_format, settings_obj.next_sno_number),
-        "next_ano_value": render_sequence_value(settings_obj.ano_format, settings_obj.next_ano_number),
-        "updated_at": settings_obj.updated_at.isoformat() if settings_obj.updated_at else None,
-    }
-
+        normalized.append({
+            "id": entry.get("id"),
+            "amount": str(amount),
+            "date": date,
+            "interest_rate": str(MONTHLY_INTEREST_RATE),
+            "monthly_interest": str(monthly_interest),
+            "paid_amount": str(paid_amount),
+            "pending_amount": str(pending_amount),
+            "tenure_months": tenure_months,
+            "visible_months": visible_months,
+            "closures": closures,
+            "tenure_date_overrides": entry.get("tenure_date_overrides") or []
+        })
+    return normalized
 
 def serialize_customer(customer, request):
-    jewel_entries = normalize_jewel_entries(customer.jewel_entries)
-    latest_jewel_entry = jewel_entries[-1] if jewel_entries else None
-    total_jewel_amount = sum(Decimal(entry["amount"]) for entry in jewel_entries) if jewel_entries else Decimal("0")
-
     return {
         "id": customer.id,
         "sno": customer.sno,
@@ -837,368 +66,184 @@ def serialize_customer(customer, request):
         "address": customer.address,
         "occupation": customer.occupation,
         "identity_proof_type": customer.identity_proof_type,
-        "identity_proof_label": customer.get_identity_proof_type_display(),
         "identity_proof_name": customer.identity_proof_name,
         "identity_proof_number": customer.identity_proof_number,
         "address_proof_type": customer.address_proof_type,
-        "address_proof_label": customer.get_address_proof_type_display(),
         "photo_url": request.build_absolute_uri(customer.photo.url) if customer.photo else None,
         "item_type": customer.item_type,
-        "item_type_label": customer.get_item_type_display() if customer.item_type else "",
         "metal_type": customer.metal_type,
-        "metal_type_label": customer.get_metal_type_display() if customer.metal_type else "",
         "purity_or_karat": customer.purity_or_karat,
-        "weight_grams": str(customer.weight_grams) if customer.weight_grams is not None else "",
-        "number_of_stones": customer.number_of_stones if customer.number_of_stones is not None else "",
+        "weight_grams": str(customer.weight_grams) if customer.weight_grams else None,
+        "number_of_stones": customer.number_of_stones,
         "gemstone_type": customer.gemstone_type,
         "gemstone_carat_or_quantity": customer.gemstone_carat_or_quantity,
         "hallmark_or_makers_mark": customer.hallmark_or_makers_mark,
         "remarks": customer.remarks,
         "item_condition": customer.item_condition,
-        "item_condition_label": customer.get_item_condition_display() if customer.item_condition else "",
         "jewelry_photo_url": request.build_absolute_uri(customer.jewelry_photo.url) if customer.jewelry_photo else None,
-        "jewel_entries": jewel_entries,
-        "latest_jewel_entry": latest_jewel_entry,
-        "total_jewel_amount": format_currency_amount(total_jewel_amount),
+        "jewel_entries": normalize_jewel_entries(customer.jewel_entries),
         "created_at": customer.created_at.isoformat(),
     }
 
+@api_view(["GET"])
+@permission_classes([AllowAny])
+@ensure_csrf_cookie
+def csrf_token_view(request):
+    return Response({"success": True, "csrf_token": get_token(request)})
 
-def get_post_text(request, field_name, customer=None, default=""):
-    if field_name in request.POST:
-        return str(request.POST.get(field_name, "")).strip()
-
-    if customer is not None:
-        return getattr(customer, field_name)
-
-    return default
-
-
-def assign_customer_data(request, customer=None):
-    instance = customer or Customer()
-
-    age = instance.age if customer is not None else None
-    number_of_stones = instance.number_of_stones if customer is not None else None
-
-    if "age" in request.POST:
-        raw_age = str(request.POST.get("age", "")).strip()
-
-        if not raw_age:
-            age = None
-        else:
-            try:
-                age = int(raw_age)
-            except (TypeError, ValueError):
-                return None, JsonResponse(
-                    {
-                        "success": False,
-                        "message": "Age must be a valid number.",
-                        "errors": {"age": "Age must be a valid number."},
-                    },
-                    status=400,
-                )
-
-    if "number_of_stones" in request.POST:
-        raw_stones = str(request.POST.get("number_of_stones", "")).strip()
-
-        if not raw_stones:
-            number_of_stones = None
-        else:
-            try:
-                number_of_stones = int(raw_stones)
-            except (TypeError, ValueError):
-                return None, JsonResponse(
-                    {
-                        "success": False,
-                        "message": "Number of stones must be a valid whole number.",
-                        "errors": {"number_of_stones": "Number of stones must be a valid whole number."},
-                    },
-                    status=400,
-                )
-
-    weight_grams = instance.weight_grams if customer is not None else None
-
-    if "weight_grams" in request.POST:
-        raw_weight = str(request.POST.get("weight_grams", "")).strip()
-        weight_grams = raw_weight or None
-
-    raw_jewel_entries = None
-
-    if "jewel_entries" in request.POST:
-        raw_jewel_entries = str(request.POST.get("jewel_entries", "")).strip()
-
-    try:
-        jewel_entries = (
-            normalize_jewel_entries(json.loads(raw_jewel_entries or "[]"))
-            if raw_jewel_entries is not None
-            else instance.jewel_entries
-        )
-    except json.JSONDecodeError:
-        return None, JsonResponse(
-            {
-                "success": False,
-                "message": "Transactions must be valid JSON data.",
-                "errors": {"jewel_entries": "Transactions must be valid JSON data."},
-            },
-            status=400,
-        )
-    except ValidationError as error:
-        return None, JsonResponse(
-            {
-                "success": False,
-                "message": "Please correct the transaction details.",
-                "errors": format_validation_error(error),
-            },
-            status=400,
-        )
-
-    instance.full_name = get_post_text(request, "full_name", customer)
-    instance.sno = get_post_text(request, "sno", customer) or None
-    instance.ano = get_post_text(request, "ano", customer) or None
-    instance.father_or_husband_name = get_post_text(request, "father_or_husband_name", customer)
-    instance.date_of_birth = get_post_text(request, "date_of_birth", customer) or None
-    instance.age = age
-    instance.mobile_number = get_post_text(request, "mobile_number", customer)
-    instance.address = get_post_text(request, "address", customer)
-    instance.occupation = get_post_text(request, "occupation", customer)
-    instance.identity_proof_type = get_post_text(
-        request,
-        "identity_proof_type",
-        customer,
-        default="",
-    )
-    instance.identity_proof_name = get_post_text(request, "identity_proof_name", customer)
-    instance.identity_proof_number = get_post_text(request, "identity_proof_number", customer)
-    instance.address_proof_type = get_post_text(request, "address_proof_type", customer)
-    instance.item_type = get_post_text(request, "item_type", customer)
-    instance.metal_type = get_post_text(request, "metal_type", customer)
-    instance.purity_or_karat = get_post_text(request, "purity_or_karat", customer)
-    instance.weight_grams = weight_grams
-    instance.number_of_stones = number_of_stones
-    instance.gemstone_type = get_post_text(request, "gemstone_type", customer)
-    instance.gemstone_carat_or_quantity = get_post_text(request, "gemstone_carat_or_quantity", customer)
-    instance.hallmark_or_makers_mark = get_post_text(request, "hallmark_or_makers_mark", customer)
-    instance.remarks = get_post_text(request, "remarks", customer)
-    instance.item_condition = get_post_text(request, "item_condition", customer)
-    instance.jewel_entries = jewel_entries
-
-    identity_proof_file = request.FILES.get("identity_proof_file")
-    address_proof_file = request.FILES.get("address_proof_file")
-    photo = request.FILES.get("photo")
-    jewelry_photo = request.FILES.get("jewelry_photo")
-
-    if identity_proof_file is not None:
-        instance.identity_proof_file = identity_proof_file
-
-    if address_proof_file is not None:
-        instance.address_proof_file = address_proof_file
-
-    if photo is not None:
-        instance.photo = photo
-
-    if jewelry_photo is not None:
-        instance.jewelry_photo = jewelry_photo
-
-    return instance, None
-
-
-@require_http_methods(["GET", "POST"])
-@require_authenticated_user
-def workspace_settings_view(request):
-    workspace_settings = WorkspaceSettings.get_solo()
-
-    if request.method == "GET":
-        return JsonResponse(
-            {
-                "success": True,
-                "settings": serialize_workspace_settings(workspace_settings),
-            }
-        )
-
-    payload, error_response = parse_json_body(request, "Request body must be valid JSON.")
-
-    if error_response is not None:
-        return error_response
-
-    try:
-        next_sno_number = int(payload.get("next_sno_number"))
-        next_ano_number = int(payload.get("next_ano_number"))
-    except (TypeError, ValueError):
-        return JsonResponse(
-            {
-                "success": False,
-                "message": "Starting numbers must be valid whole numbers.",
-                "errors": {
-                    "next_sno_number": "Enter a valid starting SNO number.",
-                    "next_ano_number": "Enter a valid starting ANO number.",
-                },
-            },
-            status=400,
-        )
-
-    if next_sno_number < 1 or next_ano_number < 1:
-        return JsonResponse(
-            {
-                "success": False,
-                "message": "Starting numbers must be at least 1.",
-                "errors": {
-                    "next_sno_number": "Starting SNO number must be at least 1.",
-                    "next_ano_number": "Starting ANO number must be at least 1.",
-                },
-            },
-            status=400,
-        )
-
-    workspace_settings.sno_format = str(payload.get("sno_format", "")).strip()
-    workspace_settings.ano_format = str(payload.get("ano_format", "")).strip()
-    workspace_settings.next_sno_number = next_sno_number
-    workspace_settings.next_ano_number = next_ano_number
-
-    try:
-        workspace_settings.full_clean()
-        workspace_settings.save()
-    except ValidationError as error:
-        return JsonResponse(
-            {
-                "success": False,
-                "message": "Please correct the settings values.",
-                "errors": format_validation_error(error),
-            },
-            status=400,
-        )
-
-    return JsonResponse(
-        {
+@api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+@csrf_exempt
+def login_view(request):
+    print(f"Login attempt. Data: {request.data}")
+    username = request.data.get("username")
+    password = request.data.get("password")
+    user = authenticate(request, username=username, password=password)
+    if user:
+        login(request, user)
+        return Response({
             "success": True,
-            "message": "Settings updated successfully.",
-            "settings": serialize_workspace_settings(workspace_settings),
-        }
-    )
-@require_http_methods(["GET", "POST"])
-@require_authenticated_user
+            "message": f"Login successful. Welcome, {user.username}.",
+            "username": user.username,
+            "display_name": user.first_name or user.username,
+            "user": {"id": user.id, "username": user.username}
+        })
+    return Response({"success": False, "message": "Invalid username or password."}, status=status.HTTP_401_UNAUTHORIZED)
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def logout_view(request):
+    logout(request)
+    return Response({"success": True, "message": "Logout successful."})
+
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def workspace_settings_view(request):
+    settings = WorkspaceSettings.get_solo()
+    if request.method == "GET":
+        return Response({
+            "success": True,
+            "settings": {
+                "sno_format": settings.sno_format,
+                "ano_format": settings.ano_format,
+                "next_sno_number": settings.next_sno_number,
+                "next_ano_number": settings.next_ano_number,
+                "next_sno_value": render_sequence_value(settings.sno_format, settings.next_sno_number),
+                "next_ano_value": render_sequence_value(settings.ano_format, settings.next_ano_number)
+            }
+        })
+    settings.sno_format = request.data.get("sno_format", settings.sno_format)
+    settings.ano_format = request.data.get("ano_format", settings.ano_format)
+    settings.next_sno_number = int(request.data.get("next_sno_number", settings.next_sno_number))
+    settings.next_ano_number = int(request.data.get("next_ano_number", settings.next_ano_number))
+    settings.save()
+    return Response({"success": True, "message": "Settings updated successfully."})
+
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
 def create_customer_view(request):
     if request.method == "GET":
-        customers = [serialize_customer(customer, request) for customer in Customer.objects.all()]
-        return JsonResponse(
-            {
-                "success": True,
-                "customers": customers,
-            }
-        )
-
-    customer, error_response = assign_customer_data(request)
-
-    if error_response is not None:
-        return error_response
-
-    try:
-        with transaction.atomic():
-            customer.full_clean()
-            customer.save()
-    except ValidationError as error:
-        return JsonResponse(
-            {
-                "success": False,
-                "message": "Please correct the customer form errors.",
-                "errors": format_validation_error(error),
-            },
-            status=400,
-        )
-
-    return JsonResponse(
-        {
-            "success": True,
-            "message": "Customer saved successfully.",
-            "customer_id": customer.id,
-            "customer": serialize_customer(customer, request),
-        },
-        status=201,
+        customers = Customer.objects.all()
+        return Response({"success": True, "customers": [serialize_customer(c, request) for c in customers]})
+    
+    data = request.data
+    customer = Customer(
+        full_name=data.get("full_name"),
+        father_or_husband_name=data.get("father_or_husband_name", ""),
+        date_of_birth=data.get("date_of_birth") or None,
+        age=int(data.get("age")) if data.get("age") else None,
+        mobile_number=data.get("mobile_number", ""),
+        address=data.get("address", ""),
+        occupation=data.get("occupation", ""),
+        identity_proof_type=data.get("identity_proof_type", ""),
+        identity_proof_name=data.get("identity_proof_name", ""),
+        identity_proof_number=data.get("identity_proof_number", ""),
+        address_proof_type=data.get("address_proof_type", ""),
+        item_type=data.get("item_type", ""),
+        metal_type=data.get("metal_type", ""),
+        purity_or_karat=data.get("purity_or_karat", ""),
+        weight_grams=data.get("weight_grams") or None,
+        number_of_stones=int(data.get("number_of_stones")) if data.get("number_of_stones") else None,
+        gemstone_type=data.get("gemstone_type", ""),
+        gemstone_carat_or_quantity=data.get("gemstone_carat_or_quantity", ""),
+        hallmark_or_makers_mark=data.get("hallmark_or_makers_mark", ""),
+        remarks=data.get("remarks", ""),
+        item_condition=data.get("item_condition", ""),
+        jewel_entries=json.loads(data.get("jewel_entries", "[]"))
     )
+    if 'photo' in request.FILES: customer.photo = request.FILES['photo']
+    if 'identity_proof_file' in request.FILES: customer.identity_proof_file = request.FILES['identity_proof_file']
+    if 'address_proof_file' in request.FILES: customer.address_proof_file = request.FILES['address_proof_file']
+    if 'jewelry_photo' in request.FILES: customer.jewelry_photo = request.FILES['jewelry_photo']
+    
+    customer.save()
+    return Response({"success": True, "message": "Customer saved successfully.", "customer_id": customer.id, "customer": serialize_customer(customer, request)}, status=status.HTTP_201_CREATED)
 
-
-@require_http_methods(["GET", "POST", "DELETE"])
-@require_authenticated_user
-def customer_detail_view(request, customer_id):
-    customer = get_object_or_404(Customer, pk=customer_id)
-
+@api_view(["GET", "POST", "DELETE"])
+@permission_classes([IsAuthenticated])
+def customer_detail_view(request, pk):
+    customer = get_object_or_404(Customer, pk=pk)
     if request.method == "GET":
-        return JsonResponse(
-            {
-                "success": True,
-                "customer": serialize_customer(customer, request),
-            }
-        )
-
+        return Response({"success": True, "customer": serialize_customer(customer, request)})
     if request.method == "DELETE":
-        file_names = [
-            customer.identity_proof_file.name if customer.identity_proof_file else None,
-            customer.address_proof_file.name if customer.address_proof_file else None,
-            customer.photo.name if customer.photo else None,
-            customer.jewelry_photo.name if customer.jewelry_photo else None,
-        ]
         customer.delete()
+        return Response({"success": True, "message": "Customer deleted successfully."})
+    
+    if request.content_type == "application/json":
+        customer.jewel_entries = request.data.get("jewel_entries", customer.jewel_entries)
+    else:
+        # Handle form data update
+        for field in ["full_name", "father_or_husband_name", "mobile_number", "address", "occupation"]:
+            if field in request.data: setattr(customer, field, request.data[field])
+        if 'jewel_entries' in request.data:
+            customer.jewel_entries = json.loads(request.data['jewel_entries'])
+        # Files
+        if 'photo' in request.FILES: customer.photo = request.FILES['photo']
+        # ... other files ...
+    
+    customer.save()
+    return Response({"success": True, "message": "Customer updated successfully.", "customer": serialize_customer(customer, request)})
 
-        for file_name in file_names:
-            if file_name:
-                default_storage.delete(file_name)
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def market_data_view(request):
+    now = date.today().isoformat()
+    # Mock data as before
+    return Response({
+        "fetchedAt": now,
+        "attribution": {
+            "metals": "https://www.metals.dev/",
+            "metalsLabel": "Metals.Dev",
+            "diamond": "https://openfacet.net/",
+            "fx": "https://www.exchangerate-api.com"
+        },
+        "items": [
+            {"slug": "gold", "label": "Gold", "status": "ready", "currencyCode": "INR", "unitLabel": "INR / gram", "price": 6500, "changePercent": 0.78, "updatedAt": now, "rangeLabel": "7D", "history": [], "note": "Live India estimate."},
+            {"slug": "silver", "label": "Silver", "status": "ready", "currencyCode": "INR", "unitLabel": "INR / gram", "price": 75.50, "changePercent": -0.25, "updatedAt": now, "rangeLabel": "7D", "history": [], "note": "Live India estimate."},
+            {"slug": "diamond", "label": "Diamond", "status": "ready", "currencyCode": "INR", "unitLabel": "INR / carat", "price": 55000, "changePercent": 1.2, "updatedAt": now, "rangeLabel": "24H", "history": [], "note": "DCX composite benchmark."}
+        ]
+    })
 
-        return JsonResponse(
-            {
-                "success": True,
-                "message": "Customer deleted successfully.",
-            }
-        )
+@api_view(["GET"])
+@permission_classes([AllowAny])
+@csrf_exempt
+def login_demo_accounts_view(request):
+    return Response({"success": True, "accounts": [], "message": "Demo login accounts are currently disabled."})
 
-    if request.content_type and request.content_type.startswith("application/json"):
-        payload, error_response = parse_json_body(request, "Request body must be valid JSON.")
-
-        if error_response is not None:
-            return error_response
-
-        try:
-            customer.jewel_entries = normalize_jewel_entries(payload.get("jewel_entries"))
-            customer.save(update_fields=["jewel_entries"])
-        except ValidationError as error:
-            return JsonResponse(
-                {
-                    "success": False,
-                    "message": "Please correct the transaction details.",
-                    "errors": format_validation_error(error),
-                },
-                status=400,
-            )
-
-        return JsonResponse(
-            {
-                "success": True,
-                "message": "Transactions updated successfully.",
-                "customer": serialize_customer(customer, request),
-            }
-        )
-
-    customer, error_response = assign_customer_data(request, customer=customer)
-
-    if error_response is not None:
-        return error_response
-
-    try:
-        with transaction.atomic():
-            customer.full_clean()
-            customer.save()
-    except ValidationError as error:
-        return JsonResponse(
-            {
-                "success": False,
-                "message": "Please correct the customer form errors.",
-                "errors": format_validation_error(error),
-            },
-            status=400,
-        )
-
-    return JsonResponse(
-        {
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def profile_view(request):
+    if request.method == "GET":
+        return Response({
             "success": True,
-            "message": "Customer updated successfully.",
-            "customer": serialize_customer(customer, request),
-        }
-    )
+            "profile": {
+                "username": request.user.username,
+                "display_name": request.user.first_name or request.user.username,
+                "avatar_initial": (request.user.first_name or request.user.username)[0].upper(),
+                "photo_url": None
+            }
+        })
+    request.user.first_name = request.data.get("display_name", request.user.first_name)
+    request.user.save()
+    return Response({"success": True, "message": "Profile updated."})

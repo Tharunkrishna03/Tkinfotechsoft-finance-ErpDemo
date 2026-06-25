@@ -263,7 +263,7 @@
   display: grid;
   gap: 6px;
   width: 100%;
-  padding-left: 0;
+  padding-left: 16px;
 }
 
 .navSubmenuFlyout {

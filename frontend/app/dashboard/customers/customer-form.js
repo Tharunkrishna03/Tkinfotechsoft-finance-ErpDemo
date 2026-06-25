@@ -7,13 +7,15 @@ import BackButton from "../back-button";
 import styles from "./customers.module.css";
 import { ResetButton, SaveButton } from "../../../components";
 import MultiSelectAutocomplete from "../../../components/ui/multi-select-autocomplete";
+import { getDashboardMarketData } from "../market-data";
+import { getCsrfToken } from "../../csrf";
 
 const MAX_PHOTO_SIZE_BYTES = 1024 * 1024;
 const MONTHLY_INTEREST_RATE = 2.5;
 const TENURE_MONTHS = 12;
 
 const itemTypeOptions = ["", "ring", "chain", "necklace", "bracelet", "bangle", "earring", "other"];
-const metalTypeOptions = ["", "gold", "silver"];
+const metalTypeOptionsInitial = ["", "gold", "silver"];
 
 const initialFormValues = {
   sno: "",
@@ -138,6 +140,7 @@ export default function CustomerForm({ mode = "create", customerId = null }) {
   const [initialSnapshot, setInitialSnapshot] = useState(initialFormValues);
   const [entries, setEntries] = useState([]);
   const [initialEntries, setInitialEntries] = useState([]);
+  const [metalTypeOptions, setMetalTypeOptions] = useState(metalTypeOptionsInitial);
   const [draft, setDraft] = useState(initialDraft);
   const [editingEntryId, setEditingEntryId] = useState(null);
   const [errors, setErrors] = useState({});
@@ -154,7 +157,7 @@ export default function CustomerForm({ mode = "create", customerId = null }) {
       return;
     }
 
-    fetch("/api/settings", { cache: "no-store" })
+    fetch("/api/settings/", { cache: "no-store" })
       .then((response) => response.json())
       .then((data) => {
         if (!data?.success) {
@@ -173,16 +176,30 @@ export default function CustomerForm({ mode = "create", customerId = null }) {
         }));
       })
       .catch(() => {});
+
+    getDashboardMarketData()
+      .then((data) => {
+        if (data?.items?.length) {
+          const liveOptions = ["", ...data.items.map((item) => item.slug)];
+          setMetalTypeOptions(liveOptions);
+        }
+      })
+      .catch(() => {});
   }, [isEditMode]);
 
   useEffect(() => {
-    if (!isEditMode || !customerId) {
+    if (!isEditMode) {
+      return;
+    }
+
+    if (!customerId) {
+      setIsInitialLoading(false);
       return;
     }
 
     let active = true;
 
-    fetch(`/api/customers/${customerId}`, { cache: "no-store" })
+    fetch(`/api/customers/${customerId}/`, { cache: "no-store" })
       .then((response) => response.json().then((data) => ({ ok: response.ok, data })))
       .then(({ ok, data }) => {
         if (!active) {
@@ -469,8 +486,11 @@ export default function CustomerForm({ mode = "create", customerId = null }) {
             payload.append("jewelry_photo", formValues.jewelry_photo);
           }
 
-          const response = await fetch(isEditMode ? `/api/customers/${customerId}` : "/api/customers", {
+          const response = await fetch(isEditMode ? `/api/customers/${customerId}/` : "/api/customers/", {
             method: "POST",
+            headers: {
+              "X-CSRFToken": getCsrfToken(),
+            },
             body: payload,
           });
           const data = await response.json();
@@ -499,7 +519,7 @@ export default function CustomerForm({ mode = "create", customerId = null }) {
               "success",
             );
 
-            const settingsResponse = await fetch("/api/settings", { cache: "no-store" });
+            const settingsResponse = await fetch("/api/settings/", { cache: "no-store" });
             const settingsData = await settingsResponse.json();
 
             if (settingsResponse.ok && settingsData?.success) {

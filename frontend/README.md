@@ -11,7 +11,8 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
-Set `NEXT_PUBLIC_DJANGO_API_URL` in `frontend/.env.local` so browser API calls target the deployed Django backend.
+For local development, set `NEXT_PUBLIC_DJANGO_API_URL=http://localhost:8000` in `frontend/.env.local`.
+If you leave it unset while running on `localhost:3000`, the browser API bridge now falls back to `http://localhost:8000` automatically.
 
 ## Static export
 

@@ -1,11 +1,32 @@
 const DEFAULT_BACKEND_URL = "https://fianance-management-system-erp.onrender.com";
+const LOCAL_BACKEND_PORT = "8000";
 const CSRF_STORAGE_KEY = "jewel_finance_csrf_token";
 
-export const BACKEND_URL = (
-  process.env.NEXT_PUBLIC_DJANGO_API_URL ??
-  process.env.DJANGO_API_URL ??
-  DEFAULT_BACKEND_URL
-).replace(/\/+$/, "");
+function normalizeBackendUrl(value) {
+  return String(value || "").trim().replace(/\/+$/, "");
+}
+
+export function getBrowserBackendUrl() {
+  const configuredBackendUrl =
+    process.env.NEXT_PUBLIC_DJANGO_API_URL ??
+    process.env.DJANGO_API_URL;
+
+  if (configuredBackendUrl) {
+    return normalizeBackendUrl(configuredBackendUrl);
+  }
+
+  if (typeof window !== "undefined") {
+    const { protocol, hostname } = window.location;
+
+    if (hostname === "localhost" || hostname === "127.0.0.1") {
+      return `${protocol}//${hostname}:${LOCAL_BACKEND_PORT}`;
+    }
+  }
+
+  return DEFAULT_BACKEND_URL;
+}
+
+export const BACKEND_URL = getBrowserBackendUrl();
 
 export function isUnsafeMethod(method) {
   return !["GET", "HEAD", "OPTIONS"].includes(String(method || "GET").toUpperCase());
@@ -53,17 +74,19 @@ export function buildBackendApiUrl(inputUrl) {
   }
 
   const url = new URL(String(inputUrl), window.location.origin);
+  const backendUrl = getBrowserBackendUrl();
 
   if (!url.pathname.startsWith("/api/")) {
     return null;
   }
 
   const pathname = url.pathname.endsWith("/") ? url.pathname : `${url.pathname}/`;
-  return `${BACKEND_URL}${pathname}${url.search}`;
+  return `${backendUrl}${pathname}${url.search}`;
 }
 
 export async function fetchCsrfToken(fetchImpl = fetch) {
-  const response = await fetchImpl(`${BACKEND_URL}/api/csrf/`, {
+  const backendUrl = getBrowserBackendUrl();
+  const response = await fetchImpl(`${backendUrl}/api/csrf/`, {
     method: "GET",
     credentials: "include",
     mode: "cors",

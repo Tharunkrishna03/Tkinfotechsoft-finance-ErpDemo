@@ -9,6 +9,7 @@ import chromeStyles from "../../app/chrome.module.css";
 import styles from "../../app/dashboard/dashboard.module.css";
 import SidebarNav from "./sidebar-nav";
 import HeaderCalendarButton from "../../app/dashboard/header-calendar-button";
+import { getCsrfToken } from "../../app/csrf";
 
 function MenuGlyph() {
   return (
@@ -116,20 +117,20 @@ function ProfileMenuLogoutIcon() {
 
 const MOBILE_DRAWER_BREAKPOINT = 860;
 
-export default function DashboardShell({ children, items }) {
-  return <DashboardShellFrame items={items}>{children}</DashboardShellFrame>;
+export default function DashboardShell({ children, items, initialProfile }) {
+  return <DashboardShellFrame items={items} initialProfile={initialProfile}>{children}</DashboardShellFrame>;
 }
 
-function DashboardShellFrame({ children, items }) {
+function DashboardShellFrame({ children, items, initialProfile }) {
   const router = useRouter();
+  const [profile, setProfile] = useState(initialProfile || null);
   const avatarMenuRef = useRef(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isDesktopViewport, setIsDesktopViewport] = useState(false);
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
-  const [profile, setProfile] = useState(null);
-  
+  const [isCalcOpen, setIsCalcOpen] = useState(false);
   const notifRef = useRef(null);
   const [isNotifOpen, setIsNotifOpen] = useState(false);
   const [notifications, setNotifications] = useState([]);
@@ -144,8 +145,6 @@ function DashboardShellFrame({ children, items }) {
     localStorage.setItem(`snoozed_${id}`, twelveHours.toString());
     setNotifications(prev => prev.filter(n => n.id !== id));
   };
-
-  const [isCalcOpen, setIsCalcOpen] = useState(false);
   const [calcExpr, setCalcExpr] = useState("");
 
   const [calcPos, setCalcPos] = useState({ x: 0, y: 0 });
@@ -278,9 +277,14 @@ function DashboardShellFrame({ children, items }) {
     setIsLoggingOut(true);
 
     try {
-      const response = await fetch("/api/logout", {
+      const response = await fetch("/api/logout/", {
         method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRFToken": getCsrfToken(),
+        },
         cache: "no-store",
+        body: JSON.stringify({}),
       });
 
       if (!response.ok) {
@@ -297,24 +301,13 @@ function DashboardShellFrame({ children, items }) {
   }
 
   useEffect(() => {
-    let active = true;
-
-    async function loadProfile() {
-      try {
-        const response = await fetch("/api/profile", {
-          cache: "no-store",
-        });
-        const data = await response.json();
-
-        if (!active || !response.ok || !data.success || !data.profile) {
-          return;
-        }
-
-        setProfile(data.profile);
-      } catch (error) {
-        console.error(error);
-      }
+    if (initialProfile) {
+      setProfile(initialProfile);
     }
+  }, [initialProfile]);
+
+  useEffect(() => {
+    let active = true;
 
     function handleViewportChange() {
       const desktopViewport = window.innerWidth > MOBILE_DRAWER_BREAKPOINT;
@@ -352,7 +345,6 @@ function DashboardShellFrame({ children, items }) {
     window.addEventListener("dashboard-profile-updated", handleProfileUpdated);
     document.addEventListener("mousedown", handleOutsideClick);
     handleViewportChange();
-    loadProfile();
 
     return () => {
       active = false;
@@ -367,7 +359,7 @@ function DashboardShellFrame({ children, items }) {
     let active = true;
     async function loadNotifications() {
       try {
-        const response = await fetch("/api/customers", { cache: "no-store" });
+        const response = await fetch("/api/customers/", { cache: "no-store" });
         const data = await response.json();
         if (!active || !response.ok || !data.success || !data.customers) return;
 
@@ -462,13 +454,15 @@ function DashboardShellFrame({ children, items }) {
           <img alt="TK Infotechsoft Logo" className={styles.brandLogo} src="/logo.png" loading="lazy" />
         </div>
 
-        <SidebarNav
-          collapsed={isDesktopViewport && isSidebarCollapsed}
-          iconOnly={isSidebarIconMode}
-          items={items}
-          onNavigate={() => {}}
-          onRequestExpand={expandSidebarFromIconMode}
-        />
+        <Suspense fallback={null}>
+          <SidebarNav
+            collapsed={isDesktopViewport && isSidebarCollapsed}
+            iconOnly={isSidebarIconMode}
+            items={items}
+            onNavigate={() => {}}
+            onRequestExpand={expandSidebarFromIconMode}
+          />
+        </Suspense>
       </aside>
 
       <div className={`${chromeStyles.dashboardColumn} ${styles.mainColumn}`}>
@@ -579,7 +573,7 @@ function DashboardShellFrame({ children, items }) {
                         alt={`${displayName} profile`}
                         className={chromeStyles.headerAvatarImage}
                         src={profile.photo_url}
-                        loading="lazy"
+                        loading="eager"
                       />
                     ) : (
                       <span className={chromeStyles.headerAvatarMark}>{avatarInitial}</span>
@@ -596,7 +590,7 @@ function DashboardShellFrame({ children, items }) {
                             alt={`${displayName} profile`}
                             className={chromeStyles.headerAvatarMenuImage}
                             src={profile.photo_url}
-                            loading="lazy"
+                            loading="eager"
                           />
                         ) : (
                           <ProfileMenuBrandIcon />
@@ -650,7 +644,7 @@ function DashboardShellFrame({ children, items }) {
 
         <div className={chromeStyles.footerText}>
           <p>Product of TK Infotechsoft</p>
-          <p>Copyright &copy; {new Date().getFullYear()} TK Infotechsoft. All rights reserved.</p>
+          <p>Copyright &copy; <span suppressHydrationWarning>{new Date().getFullYear()}</span> TK Infotechsoft. All rights reserved.</p>
         </div>
       </div>
 

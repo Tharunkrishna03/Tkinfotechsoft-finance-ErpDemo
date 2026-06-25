@@ -1,10 +1,18 @@
-"use client";
+import { Suspense } from "react";
+import CustomerEditClient from "./customer-edit-client";
 
-import { useParams } from "next/navigation";
-import CustomerForm from "../customer-form";
 
-export default function DashboardCustomerEditPage() {
-  const { id } = useParams();
+export default async function DashboardCustomerEditPage({ params }) {
+  const resolvedParams = await (params || {});
+  const id = resolvedParams?.id;
 
-  return <CustomerForm customerId={id} mode="edit" />;
+  if (!id) {
+    return <div style={{ padding: "20px" }}>Invalid Customer ID</div>;
+  }
+
+  return (
+    <Suspense fallback={null}>
+      <CustomerEditClient customerId={id} />
+    </Suspense>
+  );
 }

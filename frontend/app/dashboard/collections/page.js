@@ -51,7 +51,7 @@ function CollectionsContent() {
       toastId: "collections-page-status",
     });
 
-    fetch("/api/customers", { cache: "no-store" })
+    fetch("/api/customers/", { cache: "no-store" })
       .then((response) => response.json().then((data) => ({ ok: response.ok, data })))
       .then(({ ok, data }) => {
         if (!active) {

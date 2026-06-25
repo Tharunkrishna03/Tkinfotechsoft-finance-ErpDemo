@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { SaveButton } from "../../../components";
 import { notify } from "../../notifier";
 import styles from "./settings.module.css";
+import { getCsrfToken } from "../../csrf";
 
 const initialValues = {
   sno_format: "",
@@ -38,7 +39,7 @@ export default function DashboardSettingsPage() {
   }, []);
 
   useEffect(() => {
-    fetch("/api/settings", { cache: "no-store" })
+    fetch("/api/settings/", { cache: "no-store" })
       .then((response) => response.json().then((data) => ({ ok: response.ok, data })))
       .then(({ ok, data }) => {
         if (!ok || !data?.success) {
@@ -76,9 +77,12 @@ export default function DashboardSettingsPage() {
     try {
       await notify.promise(
         async () => {
-          const response = await fetch("/api/settings", {
+          const response = await fetch("/api/settings/", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { 
+              "Content-Type": "application/json",
+              "X-CSRFToken": getCsrfToken(),
+            },
             body: JSON.stringify({
               sno_format: values.sno_format,
               ano_format: values.ano_format,

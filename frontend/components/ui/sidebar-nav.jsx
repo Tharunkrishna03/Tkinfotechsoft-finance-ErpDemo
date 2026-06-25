@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { getCsrfToken } from "../../app/csrf";
 import styles from "../../app/dashboard/dashboard.module.css";
 
 const CUSTOMER_LINKS = [
@@ -181,9 +182,14 @@ export default function SidebarNav({
     setIsLoggingOut(true);
 
     try {
-      const response = await fetch("/api/logout", {
+      const response = await fetch("/api/logout/", {
         method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRFToken": getCsrfToken(),
+        },
         cache: "no-store",
+        body: JSON.stringify({}),
       });
 
       if (!response.ok) {

@@ -137,7 +137,7 @@ export default function DashboardTransactionsPage() {
   const [dragOverIdx, setDragOverIdx] = useState(null);
 
   useEffect(() => {
-    fetch("/api/customers", { cache: "no-store" })
+    fetch("/api/customers/", { cache: "no-store" })
       .then((response) => response.json().then((data) => ({ ok: response.ok, data })))
       .then(({ ok, data }) => {
         if (!ok || !data?.success) {

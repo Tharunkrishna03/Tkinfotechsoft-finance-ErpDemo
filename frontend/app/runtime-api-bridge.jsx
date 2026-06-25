@@ -1,6 +1,6 @@
 "use client";
 
-import { useLayoutEffect } from "react";
+import { useEffect } from "react";
 import {
   buildBackendApiUrl,
   clearStoredCsrfToken,
@@ -10,7 +10,7 @@ import {
 } from "@/lib/browser-backend";
 
 export default function RuntimeApiBridge() {
-  useLayoutEffect(() => {
+  useEffect(() => {
     if (typeof window === "undefined") {
       return undefined;
     }
@@ -58,7 +58,7 @@ export default function RuntimeApiBridge() {
         mode: "cors",
       });
 
-      if (backendUrl.endsWith("/api/logout/") && response.ok) {
+      if ((backendUrl.endsWith("/api/logout/") || backendUrl.endsWith("/api/login/")) && response.ok) {
         clearStoredCsrfToken();
       }
 

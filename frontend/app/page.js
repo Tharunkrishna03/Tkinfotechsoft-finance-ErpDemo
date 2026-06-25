@@ -89,7 +89,7 @@ function LoginLogo({ styles }) {
                 fill
                 sizes="260px"
                 className={styles.logoImage}
-                loading="lazy"
+                priority
               />
             </div>
           </MagicCard>
@@ -177,7 +177,7 @@ export default function Home() {
 
     const loadDemoAccounts = async () => {
       try {
-        const response = await fetch("/api/login/demo", {
+        const response = await fetch("/api/login/demo/", {
           method: "GET",
           cache: "no-store",
         });
@@ -246,7 +246,7 @@ export default function Home() {
     setShowConfetti(false);
 
     try {
-      const response = await fetch("/api/login", {
+      const response = await fetch("/api/login/", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(formData),

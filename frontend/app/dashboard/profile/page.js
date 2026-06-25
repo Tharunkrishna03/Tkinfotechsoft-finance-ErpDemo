@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { notify } from "../../notifier";
 import styles from "./profile.module.css";
+import { getCsrfToken } from "../../csrf";
 
 const PROFILE_UPDATED_EVENT = "dashboard-profile-updated";
 
@@ -42,7 +43,7 @@ export default function DashboardProfilePage() {
 
     async function loadProfile() {
       try {
-        const response = await fetch("/api/profile", {
+        const response = await fetch("/api/profile/", {
           cache: "no-store",
         });
         const data = await response.json();
@@ -112,10 +113,11 @@ export default function DashboardProfilePage() {
     setIsSavingName(true);
 
     try {
-      const response = await fetch("/api/profile", {
+      const response = await fetch("/api/profile/", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          "X-CSRFToken": getCsrfToken(),
         },
         body: JSON.stringify({
           display_name: displayName.trim(),
@@ -151,10 +153,11 @@ export default function DashboardProfilePage() {
     setIsChangingPassword(true);
 
     try {
-      const response = await fetch("/api/profile/password", {
+      const response = await fetch("/api/profile/password/", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          "X-CSRFToken": getCsrfToken(),
         },
         body: JSON.stringify(passwordForm),
       });
@@ -205,8 +208,11 @@ export default function DashboardProfilePage() {
       const formData = new FormData();
       formData.append("photo", selectedPhoto);
 
-      const response = await fetch("/api/profile/photo", {
+      const response = await fetch("/api/profile/photo/", {
         method: "POST",
+        headers: {
+          "X-CSRFToken": getCsrfToken(),
+        },
         body: formData,
       });
       const data = await response.json();
