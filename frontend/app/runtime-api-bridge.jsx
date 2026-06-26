@@ -9,66 +9,61 @@ import {
   isUnsafeMethod,
 } from "@/lib/browser-backend";
 
-export default function RuntimeApiBridge() {
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return undefined;
+let isFetchPatched = false;
+
+if (typeof window !== "undefined" && !isFetchPatched) {
+  isFetchPatched = true;
+  const originalFetch = window.fetch.bind(window);
+
+  window.fetch = async (input, init) => {
+    const inputUrl =
+      typeof input === "string" || input instanceof URL
+        ? String(input)
+        : input instanceof Request
+          ? input.url
+          : "";
+    const backendUrl = buildBackendApiUrl(inputUrl);
+
+    if (!backendUrl) {
+      return originalFetch(input, init);
     }
 
-    const originalFetch = window.fetch.bind(window);
+    const request = input instanceof Request ? input : null;
+    const method = String(init?.method ?? request?.method ?? "GET").toUpperCase();
+    const headers = new Headers(request?.headers ?? undefined);
 
-    window.fetch = async (input, init) => {
-      const inputUrl =
-        typeof input === "string" || input instanceof URL
-          ? String(input)
-          : input instanceof Request
-            ? input.url
-            : "";
-      const backendUrl = buildBackendApiUrl(inputUrl);
+    if (init?.headers) {
+      new Headers(init.headers).forEach((value, key) => headers.set(key, value));
+    }
 
-      if (!backendUrl) {
-        return originalFetch(input, init);
+    if (isUnsafeMethod(method)) {
+      let csrfToken = getStoredCsrfToken();
+
+      if (!csrfToken) {
+        csrfToken = await fetchCsrfToken(originalFetch);
       }
 
-      const request = input instanceof Request ? input : null;
-      const method = String(init?.method ?? request?.method ?? "GET").toUpperCase();
-      const headers = new Headers(request?.headers ?? undefined);
-
-      if (init?.headers) {
-        new Headers(init.headers).forEach((value, key) => headers.set(key, value));
+      if (csrfToken) {
+        headers.set("X-CSRFToken", csrfToken);
       }
+    }
 
-      if (isUnsafeMethod(method)) {
-        let csrfToken = getStoredCsrfToken();
+    const response = await originalFetch(backendUrl, {
+      ...init,
+      method,
+      headers,
+      credentials: "include",
+      mode: "cors",
+    });
 
-        if (!csrfToken) {
-          csrfToken = await fetchCsrfToken(originalFetch);
-        }
+    if ((backendUrl.endsWith("/api/logout/") || backendUrl.endsWith("/api/login/")) && response.ok) {
+      clearStoredCsrfToken();
+    }
 
-        if (csrfToken) {
-          headers.set("X-CSRFToken", csrfToken);
-        }
-      }
+    return response;
+  };
+}
 
-      const response = await originalFetch(backendUrl, {
-        ...init,
-        method,
-        headers,
-        credentials: "include",
-        mode: "cors",
-      });
-
-      if ((backendUrl.endsWith("/api/logout/") || backendUrl.endsWith("/api/login/")) && response.ok) {
-        clearStoredCsrfToken();
-      }
-
-      return response;
-    };
-
-    return () => {
-      window.fetch = originalFetch;
-    };
-  }, []);
-
+export default function RuntimeApiBridge() {
   return null;
 }
