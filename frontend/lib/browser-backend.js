@@ -1,4 +1,4 @@
-const DEFAULT_BACKEND_URL = "https://fianance-management-system-erp.onrender.com";
+const DEFAULT_BACKEND_URL = "https://tkinfotechsoft-finance-erpdemo.onrender.com";
 const LOCAL_BACKEND_PORT = "8000";
 const CSRF_STORAGE_KEY = "jewel_finance_csrf_token";
 
