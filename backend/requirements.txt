@@ -2,6 +2,8 @@ Django>=5.0
 djangorestframework
 django-cors-headers
 django-environ
+django-mongodb-backend
+pymongo
 requests
 pillow
 gunicorn

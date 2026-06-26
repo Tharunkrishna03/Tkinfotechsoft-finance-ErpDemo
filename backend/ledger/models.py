@@ -1,9 +1,25 @@
 import re
 from datetime import date
 from decimal import Decimal
-from django.db import models, transaction
+from django.conf import settings
+from django.db import connections, models, router, transaction as django_transaction
 from django.core.exceptions import ValidationError
 from django.core.validators import RegexValidator
+from django_mongodb_backend import transaction as mongo_transaction
+from django_mongodb_backend.fields import ObjectIdAutoField
+
+LedgerAutoField = (
+    ObjectIdAutoField
+    if getattr(settings, "LEDGER_DATABASE_ALIAS", "default") == "mongodb"
+    else models.BigAutoField
+)
+
+
+def ledger_atomic(model_class):
+    db_alias = router.db_for_write(model_class)
+    if connections[db_alias].vendor == "mongodb":
+        return mongo_transaction.atomic(using=db_alias)
+    return django_transaction.atomic(using=db_alias)
 
 def validate_sequence_format(value):
     if not value or '{number}' not in value:
@@ -19,6 +35,7 @@ def render_sequence_value(format_string, number):
     return re.sub(r"\{number(?::\d+)?\}", rendered_number, format_string)
 
 class WorkspaceSettings(models.Model):
+    id = LedgerAutoField(primary_key=True)
     sno_format = models.CharField(max_length=80, default="SNO-{number:04}", validators=[validate_sequence_format])
     ano_format = models.CharField(max_length=80, default="ANO-{number:04}", validators=[validate_sequence_format])
     next_sno_number = models.PositiveIntegerField(default=1)
@@ -27,10 +44,11 @@ class WorkspaceSettings(models.Model):
 
     @classmethod
     def get_solo(cls):
-        obj, _ = cls.objects.get_or_create(pk=1)
-        return obj
+        obj = cls.objects.order_by("pk").first()
+        return obj or cls.objects.create()
 
 class Customer(models.Model):
+    id = LedgerAutoField(primary_key=True)
     sno = models.CharField(max_length=80, unique=True, blank=True, null=True)
     sno_sequence = models.PositiveIntegerField(default=0)
     ano = models.CharField(max_length=80, unique=True, blank=True, null=True)
@@ -68,7 +86,7 @@ class Customer(models.Model):
 
     def save(self, *args, **kwargs):
         if not self.sno or not self.ano:
-            with transaction.atomic():
+            with ledger_atomic(type(self)):
                 settings = WorkspaceSettings.get_solo()
                 if not self.sno:
                     self.sno_sequence = settings.next_sno_number

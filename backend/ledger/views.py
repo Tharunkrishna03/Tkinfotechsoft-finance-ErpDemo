@@ -53,7 +53,7 @@ def normalize_jewel_entries(raw_entries):
 
 def serialize_customer(customer, request):
     return {
-        "id": customer.id,
+        "id": str(customer.id),
         "sno": customer.sno,
         "sno_sequence": customer.sno_sequence,
         "ano": customer.ano,
@@ -178,7 +178,7 @@ def create_customer_view(request):
     if 'jewelry_photo' in request.FILES: customer.jewelry_photo = request.FILES['jewelry_photo']
     
     customer.save()
-    return Response({"success": True, "message": "Customer saved successfully.", "customer_id": customer.id, "customer": serialize_customer(customer, request)}, status=status.HTTP_201_CREATED)
+    return Response({"success": True, "message": "Customer saved successfully.", "customer_id": str(customer.id), "customer": serialize_customer(customer, request)}, status=status.HTTP_201_CREATED)
 
 @api_view(["GET", "POST", "DELETE"])
 @permission_classes([IsAuthenticated])
