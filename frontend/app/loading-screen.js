@@ -6,9 +6,13 @@ export default function LoadingScreen({ label = "Loading..." }) {
   return (
     <div className={styles.wrapper}>
       <div className={styles.loader} aria-hidden="true">
-        <span className={styles.loaderRing} />
-        <span className={styles.loaderRing} />
-        <span className={styles.loaderCore} />
+        <div className={styles.loaderSquare}></div>
+        <div className={styles.loaderSquare}></div>
+        <div className={styles.loaderSquare}></div>
+        <div className={styles.loaderSquare}></div>
+        <div className={styles.loaderSquare}></div>
+        <div className={styles.loaderSquare}></div>
+        <div className={styles.loaderSquare}></div>
       </div>
       {label ? <p className={styles.label}>{label}</p> : null}
     </div>
